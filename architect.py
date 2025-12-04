@@ -372,11 +372,12 @@ class AudioRecorder:
 # ============================================================================
 
 class GeminiAgent:
-    """Manages communication with Gemini API"""
+    """Manages communication with Gemini API (Persistent Session)"""
     
     def __init__(self, config: Config, fs_tools: FileSystemTools):
         self.config = config
         self.fs_tools = fs_tools
+        self.chat_session = None  # Store the session here
         
         # Configure Gemini
         api_key = config.get("gemini_api_key")
@@ -385,7 +386,7 @@ class GeminiAgent:
         
         genai.configure(api_key=api_key)
         
-        # Define function declarations for Gemini
+        # Define function declarations (Same as your original code)
         self.tools = [
             {
                 "function_declarations": [
@@ -398,30 +399,21 @@ class GeminiAgent:
                         "name": "read_file",
                         "description": "Read the content of a specific file",
                         "parameters": {
-                            "type": "object",
+                            "type": "object", 
                             "properties": {
-                                "path": {
-                                    "type": "string",
-                                    "description": "Relative path to the file (e.g., 'src/main.py')"
-                                }
+                                "path": {"type": "string", "description": "Relative path to the file"}
                             },
                             "required": ["path"]
                         }
                     },
                     {
                         "name": "write_file",
-                        "description": "Create or modify a file. IMPORTANT: This will trigger human review before execution.",
+                        "description": "Create or modify a file. The AI pauses here for human review.",
                         "parameters": {
                             "type": "object",
                             "properties": {
-                                "path": {
-                                    "type": "string",
-                                    "description": "Relative path to the file (e.g., 'fibonacci.py')"
-                                },
-                                "content": {
-                                    "type": "string",
-                                    "description": "Complete file content to write"
-                                }
+                                "path": {"type": "string", "description": "Relative path to the file"},
+                                "content": {"type": "string", "description": "Complete file content to write"}
                             },
                             "required": ["path", "content"]
                         }
@@ -435,198 +427,112 @@ class GeminiAgent:
             model_name=model_name,
             tools=self.tools
         )
-    
-    def process_command(self, user_command: str, log_callback) -> Optional[List[Dict[str, Any]]]:
-        """Process user command with Gemini"""
-        debug_mode = self.config.get("enable_debug_logging", True)
+
+        # Initialize the persistent session immediately
+        self._start_new_session()
+
+    def _start_new_session(self):
+        """Internal method to start/reset the chat session"""
+        system_prompt = self.config.get("system_prompt")
+        file_tree = self.fs_tools.get_file_tree()
         
+        # We assume the first message sets the context
+        self.chat_session = self.model.start_chat(history=[
+            {
+                "role": "user",
+                "parts": [f"{system_prompt}\n\nCurrent Project Structure:\n{file_tree}"]
+            },
+            {
+                "role": "model",
+                "parts": ["Understood. I am The Architect. Ready to analyze code and file structures."]
+            }
+        ])
+
+    def process_command(self, user_input: str, log_callback) -> Optional[List[Dict[str, Any]]]:
+        """Process a message (User voice OR System feedback)"""
         try:
-            system_prompt = self.config.get("system_prompt")
-            file_tree = self.fs_tools.get_file_tree()
-            
-            initial_message = f"""{system_prompt}
-
-Current Project Structure:
-{file_tree}
-
-User Command: {user_command}
-
-Analyze this command and use the available tools to complete the task."""
-            
-            if debug_mode:
-                log_callback("=" * 60, "debug")
-                log_callback("🔍 DEBUG: Sending initial message to Gemini", "debug")
-                log_callback(f"📤 User Command: {user_command}", "debug")
-                log_callback("=" * 60, "debug")
-            
-            log_callback("🧠 Starting conversation with Gemini...", "ai")
-            
-            chat = self.model.start_chat()
-            response = chat.send_message(initial_message)
-            
-            if debug_mode:
-                log_callback("=" * 60, "debug")
-                log_callback("📥 DEBUG: Received response from Gemini", "debug")
-                log_callback(f"Response object type: {type(response)}", "debug")
-                log_callback(f"Number of candidates: {len(response.candidates)}", "debug")
-                log_callback("=" * 60, "debug")
-            
-            # Process function calls
-            max_iterations = 10
-            iteration = 0
-            
-            while iteration < max_iterations:
-                if debug_mode:
-                    log_callback(f"🔄 DEBUG: Iteration {iteration + 1}/{max_iterations}", "debug")
-                
-                # Check for function calls
-                if not response.candidates[0].content.parts:
-                    if debug_mode:
-                        log_callback("⚠️ DEBUG: No content parts in response", "debug")
-                    break
-                
-                if debug_mode:
-                    log_callback(f"📦 DEBUG: Response has {len(response.candidates[0].content.parts)} part(s)", "debug")
-                
-                # Collect all write requests from this response
-                write_requests = []
-                function_responses = []
-                has_function_calls = False
-                
-                for part_idx, part in enumerate(response.candidates[0].content.parts):
-                    if debug_mode:
-                        log_callback(f"🔍 DEBUG: Processing part {part_idx + 1}", "debug")
-                        log_callback(f"   Part type: {type(part)}", "debug")
-                        log_callback(f"   Has text: {hasattr(part, 'text')}", "debug")
-                        log_callback(f"   Has function_call: {hasattr(part, 'function_call')}", "debug")
-                    
-                    # Handle text response
-                    if hasattr(part, 'text') and part.text:
-                        if debug_mode:
-                            log_callback(f"💬 DEBUG: Text content ({len(part.text)} chars)", "debug")
-                        log_callback(f"💭 {part.text}", "ai")
-                    
-                    # Handle function call
-                    if hasattr(part, 'function_call') and part.function_call:
-                        has_function_calls = True
-                        fc = part.function_call
-                        function_name = fc.name
-                        args = dict(fc.args) if fc.args else {}
-                        
-                        if debug_mode:
-                            log_callback("=" * 60, "debug")
-                            log_callback(f"🛠️ DEBUG: Function call detected!", "debug")
-                            log_callback(f"   Function: {function_name}", "debug")
-                            log_callback(f"   Arguments: {args}", "debug")
-                            log_callback("=" * 60, "debug")
-                        
-                        log_callback(f"🔧 Calling: {function_name}({args})", "ai")
-                        
-                        # Execute function
-                        if function_name == "get_file_tree":
-                            result = self.fs_tools.get_file_tree()
-                            if debug_mode:
-                                log_callback(f"📂 DEBUG: File tree returned ({len(result)} chars)", "debug")
-                            
-                            function_responses.append({
-                                "name": function_name,
-                                "response": {"result": result}
-                            })
-                            
-                        elif function_name == "read_file":
-                            result = self.fs_tools.read_file(args.get("path", ""))
-                            if debug_mode:
-                                log_callback(f"📄 DEBUG: Read file result ({len(result)} chars)", "debug")
-                            
-                            function_responses.append({
-                                "name": function_name,
-                                "response": {"result": result}
-                            })
-                            
-                        elif function_name == "write_file":
-                            if debug_mode:
-                                log_callback("✍️ DEBUG: Write file requested - adding to batch", "debug")
-                                log_callback(f"   Path: {args.get('path', '')}", "debug")
-                                log_callback(f"   Content length: {len(args.get('content', ''))} chars", "debug")
-                            
-                            # Prepare write request for human review
-                            write_info = self.fs_tools.prepare_write(
-                                args.get("path", ""),
-                                args.get("content", "")
-                            )
-                            
-                            if write_info.get("success"):
-                                write_requests.append(write_info)
-                            
-                            # Send success response back to Gemini
-                            function_responses.append({
-                                "name": function_name,
-                                "response": {"result": "File prepared for review"}
-                            })
-                        
-                        else:
-                            result = f"Unknown function: {function_name}"
-                            if debug_mode:
-                                log_callback(f"❌ DEBUG: Unknown function called!", "debug")
-                            
-                            function_responses.append({
-                                "name": function_name,
-                                "response": {"result": result}
-                            })
-                
-                # If we have write requests, return them all for review
-                if write_requests:
-                    if debug_mode:
-                        log_callback(f"✅ DEBUG: {len(write_requests)} file(s) prepared - returning for review", "debug")
-                    return write_requests
-                
-                # If we had function calls (but no writes), send responses back
-                if has_function_calls:
-                    if debug_mode:
-                        log_callback(f"📤 DEBUG: Sending {len(function_responses)} function result(s) back to Gemini", "debug")
-                    
-                    # Send all function responses back at once
-                    response = chat.send_message(
-                        genai.protos.Content(
-                            parts=[
-                                genai.protos.Part(
-                                    function_response=genai.protos.FunctionResponse(
-                                        name=fr["name"],
-                                        response=fr["response"]
-                                    )
-                                )
-                                for fr in function_responses
-                            ]
-                        )
-                    )
-                    
-                    iteration += 1
-                else:
-                    # No function calls in any part
-                    if debug_mode:
-                        log_callback("🏁 DEBUG: No function calls found - ending loop", "debug")
-                    break
-                
-                if iteration >= max_iterations:
-                    if debug_mode:
-                        log_callback("⚠️ DEBUG: Max iterations reached!", "debug")
-            
-            if debug_mode:
-                log_callback("=" * 60, "debug")
-                log_callback("✅ DEBUG: Processing complete", "debug")
-                log_callback("=" * 60, "debug")
-            
-            log_callback("✅ Task completed", "success")
-            return None
+            # Refresh file tree context periodically or on request (simplified here)
+            # Send message to EXISTING session
+            response = self.chat_session.send_message(user_input)
+            return self._handle_model_response(response, log_callback)
             
         except Exception as e:
-            log_callback(f"❌ Error: {str(e)}", "error")
-            if debug_mode:
-                import traceback
-                log_callback("🐛 DEBUG: Full traceback:", "debug")
-                log_callback(traceback.format_exc(), "debug")
+            log_callback(f"❌ Error communicating with Gemini: {str(e)}", "error")
             return None
 
+    def _handle_model_response(self, response, log_callback):
+        """Internal loop to handle function calls until a write occurs or completion"""
+        max_iterations = 10
+        iteration = 0
+        
+        while iteration < max_iterations:
+            # Check for function calls in the current response
+            if not response.candidates or not response.candidates[0].content.parts:
+                break
+
+            function_responses = []
+            write_requests = []
+            has_function_calls = False
+
+            for part in response.candidates[0].content.parts:
+                # 1. Handle Text
+                if hasattr(part, 'text') and part.text:
+                    log_callback(f"💭 {part.text}", "ai")
+
+                # 2. Handle Function Calls
+                if hasattr(part, 'function_call') and part.function_call:
+                    has_function_calls = True
+                    fc = part.function_call
+                    function_name = fc.name
+                    args = dict(fc.args)
+                    
+                    log_callback(f"🔧 Calling: {function_name}", "ai")
+
+                    if function_name == "get_file_tree":
+                        result = self.fs_tools.get_file_tree()
+                        function_responses.append({"name": function_name, "response": {"result": result}})
+                    
+                    elif function_name == "read_file":
+                        result = self.fs_tools.read_file(args.get("path", ""))
+                        function_responses.append({"name": function_name, "response": {"result": result}})
+                    
+                    elif function_name == "write_file":
+                        # STOP THE LOOP HERE. Return to GUI for review.
+                        # We do NOT execute this yet.
+                        write_info = self.fs_tools.prepare_write(args.get("path", ""), args.get("content", ""))
+                        if write_info.get("success"):
+                            write_requests.append(write_info)
+                        else:
+                            # Auto-fail if permission denied, etc.
+                            function_responses.append({
+                                "name": function_name, 
+                                "response": {"error": write_info.get("error")}
+                            })
+
+            # If we have write requests, we must PAUSE execution and return to GUI
+            if write_requests:
+                return write_requests
+
+            # If we have other function results (read/tree), send them back immediately and loop
+            if has_function_calls and function_responses:
+                response = self.chat_session.send_message(
+                    genai.protos.Content(
+                        parts=[
+                            genai.protos.Part(
+                                function_response=genai.protos.FunctionResponse(
+                                    name=fr["name"],
+                                    response=fr["response"]
+                                )
+                            ) for fr in function_responses
+                        ]
+                    )
+                )
+                iteration += 1
+            else:
+                # No function calls, just text, we are done
+                break
+        
+        return None
 
 # ============================================================================
 # GUI Application
@@ -775,9 +681,7 @@ class ArchitectGUI:
     def process_audio(self):
         """Process recorded audio (runs in background)"""
         try:
-            # Transcribe
             text = self.audio_recorder.stop_recording()
-            
             if not text:
                 self.log_queue.put(("❌ No speech detected", "error"))
                 self.log_queue.put(("status_update", "⚪ Idle"))
@@ -785,28 +689,36 @@ class ArchitectGUI:
             
             self.log_queue.put((f"📝 You said: {text}", "user"))
             
-            # Send to Gemini
-            write_requests = self.gemini_agent.process_command(
-                text,
-                lambda msg, tag: self.log_queue.put((msg, tag))
-            )
-            
-            # Handle write requests (can be multiple files)
-            if write_requests:
-                if isinstance(write_requests, list):
-                    for write_info in write_requests:
-                        if write_info.get("success"):
-                            self.log_queue.put(("review", write_info))
-                elif isinstance(write_requests, dict) and write_requests.get("success"):
-                    # Single file (backward compatibility)
-                    self.log_queue.put(("review", write_requests))
-            
-            self.log_queue.put(("status_update", "⚪ Idle"))
-            
+            # Start the chain
+            self.continue_conversation(text)
+
         except Exception as e:
             self.log_queue.put((f"❌ Error: {str(e)}", "error"))
             self.log_queue.put(("status_update", "⚪ Idle"))
     
+    def continue_conversation(self, message: str):
+        """Helper to send message to Agent and handle the response loop"""
+        # Run in a thread to avoid freezing GUI
+        def _run():
+            self.log_queue.put(("status_update", "⚡ Thinking..."))
+            
+            # Send to Gemini (Persistent Session)
+            write_requests = self.gemini_agent.process_command(
+                message,
+                lambda msg, tag: self.log_queue.put((msg, tag))
+            )
+            
+            # If Gemini wants to write files, trigger the popup
+            if write_requests:
+                # We only handle the first one in the batch for safety, 
+                # or loop through them. Simplest is one by one.
+                for write_info in write_requests:
+                    self.log_queue.put(("review", write_info))
+            else:
+                self.log_queue.put(("status_update", "⚪ Idle"))
+
+        threading.Thread(target=_run, daemon=True).start()
+
     def process_log_queue(self):
         """Process messages from background threads"""
         try:
@@ -876,16 +788,26 @@ class ArchitectGUI:
         button_frame.pack(pady=10)
         
         def apply_changes():
+            # 1. Execute the write
             result = self.fs_tools.execute_write(
                 write_info["relative_path"],
                 write_info["content"]
             )
             self.log_message(result, "success" if "SUCCESS" in result else "error")
             popup.destroy()
-        
+            
+            # 2. CRITICAL FIX: Tell Gemini the file is done!
+            # We send a "System Message" back to the agent to trigger the next step.
+            system_msg = f"System: Successfully created {write_info['relative_path']}. content written. Proceed with the next step or file if any."
+            self.continue_conversation(system_msg)
+
         def discard_changes():
-            self.log_message("❌ Changes discarded by user", "error")
+            self.log_message(f"❌ Skipped {write_info['relative_path']}", "error")
             popup.destroy()
+            
+            # Tell Gemini we skipped it
+            system_msg = f"System: User skipped creating {write_info['relative_path']}. Stop generating files."
+            self.continue_conversation(system_msg)
         
         apply_btn = tk.Button(
             button_frame,
