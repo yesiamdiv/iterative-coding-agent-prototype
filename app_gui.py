@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import scrolledtext, messagebox, simpledialog
+from tkinter import scrolledtext, messagebox, simpledialog, filedialog, ttk
 import threading
 import queue
 from pathlib import Path
@@ -28,6 +28,7 @@ class AppGUI:
         self.log_queue = queue.Queue()
         self.pending_actions = []
         self.review_window = None
+        self.settings_window = None
         
         # Initialize components
         self.fs_tools = FileSystemTools(self.config)
@@ -51,6 +52,29 @@ class AppGUI:
         self.root = tk.Tk()
         self.root.title("The Architect v0.3 - Voice-to-Code")
         self.root.geometry("800x600")
+
+        # --- Tkinter Variables ---
+        self.debug_var = tk.BooleanVar(value=self.config.get("enable_debug_logging", "False").lower() == "true")
+        self.persistent_session_var = tk.BooleanVar(value=self.config.get("persistent_session", "False").lower() == "true")
+
+        # --- Menu Bar ---
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+
+        # File Menu
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="Change Working Directory...", command=self._change_working_directory)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.root.quit)
+
+        # Settings Menu
+        settings_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Settings", menu=settings_menu)
+        settings_menu.add_checkbutton(label="Enable Debug Logging", variable=self.debug_var, command=self._toggle_debug_logging)
+        settings_menu.add_checkbutton(label="Persistent Session", variable=self.persistent_session_var, command=self._toggle_persistent_session)
+        settings_menu.add_separator()
+        settings_menu.add_command(label="Advanced Settings...", command=self._open_settings_window)
         
         theme = self.config.get("gui_theme", {})
         bg_color = theme.get("bg_color", "#1e1e1e")
@@ -131,6 +155,133 @@ class AppGUI:
     def handle_agent_status(self, status: str):
         """Callback for the Agent to signal task completion or error."""
         self.log_queue.put(("agent_status", status))
+
+    # --- Settings and Configuration ---
+
+    def _change_working_directory(self):
+        """Opens a dialog to select a new working directory."""
+        new_dir = filedialog.askdirectory(
+            title="Select Project Folder",
+            initialdir=self.fs_tools.working_dir
+        )
+        if new_dir:
+            self.config.set("working_directory", new_dir)
+            
+            # Re-initialize components that depend on the working directory
+            self.fs_tools = FileSystemTools(self.config)
+            self.agent = Agent(
+                config=self.config,
+                fs_tools=self.fs_tools,
+                log_callback=self.update_log_display,
+                action_callback=self.show_action_review_popup,
+                status_callback=self.handle_agent_status
+            )
+            # Update debug/persistent states on the new agent instance
+            self.agent.debug_enabled = self.debug_var.get()
+            self.agent.persistent_session_enabled = self.persistent_session_var.get()
+            
+            self.log_message(f"🚀 Project directory changed. Restarting agent...", "info")
+            self.log_message(f"📂 New working directory: {self.fs_tools.working_dir}", "ai")
+
+    def _toggle_debug_logging(self):
+        """Toggles debug logging on/off."""
+        is_enabled = self.debug_var.get()
+        self.config.set("enable_debug_logging", str(is_enabled))
+        if self.agent:
+            self.agent.debug_enabled = is_enabled
+        self.log_message(f"Debug logging {'enabled' if is_enabled else 'disabled'}.", "info")
+
+    def _toggle_persistent_session(self):
+        """Toggles persistent session on/off."""
+        is_enabled = self.persistent_session_var.get()
+        self.config.set("persistent_session", str(is_enabled))
+        if self.agent:
+            self.agent.persistent_session_enabled = is_enabled
+        self.log_message(f"Persistent session {'enabled' if is_enabled else 'disabled'}. A restart may be required for full effect.", "info")
+
+    def _open_settings_window(self):
+        """Creates and manages the advanced settings window."""
+        if self.settings_window and self.settings_window.winfo_exists():
+            self.settings_window.lift()
+            return
+
+        self.settings_window = tk.Toplevel(self.root)
+        self.settings_window.title("Advanced Settings")
+        self.settings_window.geometry("600x650")
+
+        theme = self.config.get("gui_theme", {})
+        bg_color = theme.get("bg_color", "#1e1e1e")
+        fg_color = theme.get("fg_color", "#ffffff")
+        entry_bg = theme.get("log_bg", "#2d2d2d")
+        
+        self.settings_window.configure(bg=bg_color)
+
+        main_frame = tk.Frame(self.settings_window, bg=bg_color, padx=15, pady=15)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Helper to create rows
+        def create_setting_row(parent, label_text, row):
+            label = tk.Label(parent, text=label_text, bg=bg_color, fg=fg_color, anchor="w")
+            label.grid(row=row, column=0, sticky="w", pady=(0, 5))
+            frame = tk.Frame(parent, bg=bg_color)
+            frame.grid(row=row, column=1, sticky="ew", pady=(0, 5))
+            return frame
+
+        # --- Settings Widgets ---
+        # STT Provider
+        stt_frame = create_setting_row(main_frame, "STT Provider:", 0)
+        stt_provider_var = tk.StringVar(value=self.config.get("stt_provider"))
+        stt_options = ["gemini", "whisper"]
+        stt_dropdown = ttk.Combobox(stt_frame, textvariable=stt_provider_var, values=stt_options, state="readonly")
+        stt_dropdown.pack(fill=tk.X)
+
+        # Agent Model
+        agent_model_frame = create_setting_row(main_frame, "Agent Model:", 1)
+        agent_model_var = tk.StringVar(value=self.config.get("gemini_model"))
+        agent_model_entry = tk.Entry(agent_model_frame, textvariable=agent_model_var, bg=entry_bg, fg=fg_color, insertbackground=fg_color)
+        agent_model_entry.pack(fill=tk.X)
+
+        # STT Model
+        stt_model_frame = create_setting_row(main_frame, "Gemini STT Model:", 2)
+        stt_model_var = tk.StringVar(value=self.config.get("gemini_stt_model"))
+        stt_model_entry = tk.Entry(stt_model_frame, textvariable=stt_model_var, bg=entry_bg, fg=fg_color, insertbackground=fg_color)
+        stt_model_entry.pack(fill=tk.X)
+
+        # System Prompt
+        tk.Label(main_frame, text="System Prompt:", bg=bg_color, fg=fg_color, anchor="w").grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 5))
+        prompt_text = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, height=15, bg=entry_bg, fg=fg_color, font=("Courier", 10), insertbackground=fg_color)
+        prompt_text.grid(row=4, column=0, columnspan=2, sticky="nsew")
+        prompt_text.insert(tk.END, self.config.get("system_prompt"))
+        
+        main_frame.grid_columnconfigure(1, weight=1)
+        main_frame.grid_rowconfigure(4, weight=1)
+
+        # --- Save/Cancel Buttons ---
+        def save_settings():
+            self.config.set("stt_provider", stt_provider_var.get())
+            self.config.set("gemini_model", agent_model_var.get())
+            self.config.set("gemini_stt_model", stt_model_var.get())
+            self.config.set("system_prompt", prompt_text.get("1.0", tk.END).strip())
+            
+            self.log_message("Settings saved. A restart is recommended for all changes to take effect.", "info")
+            # Re-initialize agent with new models/prompts
+            self.agent = Agent(
+                config=self.config,
+                fs_tools=self.fs_tools,
+                log_callback=self.update_log_display,
+                action_callback=self.show_action_review_popup,
+                status_callback=self.handle_agent_status
+            )
+            self.settings_window.destroy()
+
+        button_frame = tk.Frame(main_frame, bg=bg_color)
+        button_frame.grid(row=5, column=0, columnspan=2, pady=(10, 0), sticky="e")
+        
+        save_button = tk.Button(button_frame, text="Save & Close", command=save_settings, bg="#4caf50", fg="white")
+        save_button.pack(side=tk.RIGHT, padx=5)
+        
+        cancel_button = tk.Button(button_frame, text="Cancel", command=self.settings_window.destroy, bg="#f44336", fg="white")
+        cancel_button.pack(side=tk.RIGHT)
 
     # --- Core GUI Logic ---
 

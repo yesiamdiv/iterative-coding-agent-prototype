@@ -40,7 +40,7 @@ class Config:
         ],
         "max_file_size_kb": 500,
         "backup_extension": ".bak",
-        "working_directory": "./example/project5/",
+        "working_directory": ".",
         "enable_debug_logging": "True",
         "persistent_session": "False",
         "gui_theme": {
