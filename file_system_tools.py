@@ -1,5 +1,8 @@
+import os
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Union
+import shutil # Import shutil for backup operations
+
 from config import Config
 
 # ============================================================================
@@ -9,21 +12,35 @@ from config import Config
 class FileSystemTools:
     """Provides file system operations for the AI"""
     
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, working_dir: Optional[Union[str, Path]] = None):
         self.config = config
-        self.working_dir = Path(config.get("working_directory", ".")).resolve()
-        self.ignored_folders = config.get("ignored_folders", [])
+        if working_dir:
+            self.working_dir = Path(working_dir).resolve()
+        else:
+            self.working_dir = Path(config.get("working_directory", ".")).resolve()
+        
+        # Load ignored folders specific to the current working directory
+        self.ignored_folders = self.config.get_project_ignored_files(self.working_dir)
+        
         self.max_file_size = config.get("max_file_size_kb", 500) * 1024
         self.backup_ext = config.get("backup_extension", ".bak")
     
+    def update_working_dir(self, new_working_dir: Union[str, Path]):
+        """Update the working directory and reload ignored folders."""
+        self.working_dir = Path(new_working_dir).resolve()
+        # Reload ignored folders based on the new working directory
+        self.ignored_folders = self.config.get_project_ignored_files(self.working_dir)
+        self.config.set("working_directory", str(self.working_dir))
+
     def get_file_tree(self) -> str:
         """Generate a tree structure of the project"""
         tree_lines = [f"📁 {self.working_dir.name}/"]
         
         def build_tree(path: Path, prefix: str = "", is_last: bool = True):
             try:
-                items = sorted(path.iterdir(), key=lambda x: (not x.is_dir(), x.name))
-                items = [item for item in items if item.name not in self.ignored_folders]
+                # Get all items, then filter out ignored ones
+                all_items = sorted(path.iterdir(), key=lambda x: (not x.is_dir(), x.name))
+                items = [item for item in all_items if item.name not in self.ignored_folders]
                 
                 for i, item in enumerate(items):
                     is_last_item = (i == len(items) - 1)
@@ -32,16 +49,23 @@ class FileSystemTools:
                     
                     if item.is_dir():
                         extension = "    " if is_last_item else "│   "
+                        # Recursively call build_tree only for non-ignored directories
                         build_tree(item, prefix + extension, is_last_item)
             except PermissionError:
+                # Silently ignore permission errors for directories
+                pass
+            except FileNotFoundError:
+                # Handle cases where a directory might disappear during iteration
                 pass
         
+        # Start building the tree from the working directory
         build_tree(self.working_dir)
         return "\n".join(tree_lines)
     
     def read_file(self, path: str) -> str:
         """Read file content"""
         try:
+            # Construct the absolute path
             file_path = (self.working_dir / path).resolve()
             
             # Security check: ensure path is within working directory
@@ -51,6 +75,12 @@ class FileSystemTools:
             if not file_path.exists():
                 return f"ERROR: File not found - {path}"
             
+            # Check if the file is in an ignored folder (even if path is explicit)
+            relative_path_parts = file_path.relative_to(self.working_dir).parts
+            for ignored in self.ignored_folders:
+                if ignored in relative_path_parts:
+                    return f"ERROR: Access denied - file is in an ignored folder: {path}"
+
             if file_path.stat().st_size > self.max_file_size:
                 return f"ERROR: File too large (max {self.max_file_size // 1024}KB)"
             
@@ -64,14 +94,33 @@ class FileSystemTools:
         try:
             file_path = (self.working_dir / path).resolve()
             
-            # Security check
+            # Security check: ensure path is within working directory
             if not str(file_path).startswith(str(self.working_dir)):
                 return {
                     "success": False,
                     "error": "Access denied - path outside working directory"
                 }
             
-            # Check if backup needed
+            # Check if the file is in an ignored folder
+            relative_path_parts = file_path.relative_to(self.working_dir).parts
+            is_ignored = False
+            for ignored in self.ignored_folders:
+                 if ignored in relative_path_parts:
+                    is_ignored = True
+                    break
+            
+            if is_ignored:
+                # Return a specific status for ignored files
+                return {
+                    "success": "ignored", # Custom status for ignored files
+                    "path": str(file_path),
+                    "relative_path": path,
+                    "content": content,
+                    "needs_backup": file_path.exists(),
+                    "is_new": not file_path.exists()
+                }
+            
+            # If not ignored, proceed as before
             needs_backup = file_path.exists()
             
             return {
@@ -79,8 +128,7 @@ class FileSystemTools:
                 "path": str(file_path),
                 "relative_path": path,
                 "content": content,
-                # "needs_backup": needs_backup,
-                "needs_backup": False,
+                "needs_backup": needs_backup,
                 "is_new": not needs_backup
             }
         except Exception as e:
@@ -96,9 +144,14 @@ class FileSystemTools:
             
             # Create backup if file exists
             if file_path.exists():
-                # backup_path = file_path.with_suffix(file_path.suffix + self.backup_ext)
-                # shutil.copy2(file_path, backup_path)
-                action = "Updated"
+                backup_path = file_path.with_suffix(file_path.suffix + self.backup_ext)
+                try:
+                    shutil.copy2(file_path, backup_path)
+                    action = "Updated (with backup created)"
+                except Exception as backup_err:
+                    # Log or return error if backup fails, but proceed with write
+                    print(f"Warning: Failed to create backup for {path}: {backup_err}")
+                    action = "Updated (backup failed)"
             else:
                 action = "Created"
             

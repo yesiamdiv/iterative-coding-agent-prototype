@@ -211,6 +211,26 @@ class Agent:
             self.log_callback(f"❌ Error continuing conversation: {str(e)}", "error")
             self.status_callback("error")
 
+    def update_file_tree_context(self, conversation_id: str):
+        """
+        Updates the file tree context for an ongoing conversation.
+        This is particularly useful for persistent sessions when ignore settings change.
+        """
+        try:
+            chat_session = self.conversations.get(conversation_id)
+            if chat_session:
+                latest_file_tree = self.fs_tools.get_file_tree()
+                self._debug_log(f"Updating file tree context for conversation {conversation_id}.")
+                updated_tree_message = f"USER: The project's file tree has been updated due to recent changes in ignore settings. Please take this new project structure into account for all future actions:\n\nNew Project Structure:\n{latest_file_tree}"
+                
+                # Send this as a user message to the AI in the ongoing chat
+                chat_session.send_message(updated_tree_message)
+                self.log_callback("✅ Agent's file tree context updated for persistent session.", "info")
+            else:
+                self.log_callback(f"⚠️ Cannot update file tree context: Conversation {conversation_id} not found.", "info")
+        except Exception as e:
+            self.log_callback(f"❌ Error updating agent's file tree context: {str(e)}", "error")
+
     def _process_response(self, conversation_id: str, response: Any):
         """
         Processes a model's response, handling the iterative reasoning loop.

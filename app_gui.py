@@ -29,6 +29,8 @@ class AppGUI:
         self.pending_actions = []
         self.review_window = None
         self.settings_window = None
+        self.ignore_settings_window = None
+        self.current_file_tree = ""
         
         # Initialize components
         self.fs_tools = FileSystemTools(self.config)
@@ -46,6 +48,9 @@ class AppGUI:
         
         # Start log queue processor
         self.process_log_queue()
+        
+        # Fetch initial file tree
+        self.update_file_tree()
     
     def build_gui(self):
         """Build the Tkinter interface"""
@@ -65,6 +70,7 @@ class AppGUI:
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
         file_menu.add_command(label="Change Working Directory...", command=self._change_working_directory)
+        file_menu.add_command(label="Ignore Files/Folders...", command=self._open_ignore_settings_window) # Added menu item
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.quit)
 
@@ -115,6 +121,24 @@ class AppGUI:
         self.log_text.tag_config("error", foreground=theme.get("error_color", "#f44336"))
         self.log_text.tag_config("debug", foreground=theme.get("debug_color", "#9c27b0"))
         
+        # Input area for text
+        input_frame = tk.Frame(self.root, bg=bg_color)
+        input_frame.pack(pady=5, padx=10, fill=tk.X)
+
+        self.text_input = tk.Entry(input_frame, font=("Arial", 12), bg=log_bg, fg=log_fg, insertbackground=fg_color)
+        self.text_input.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        self.text_input.bind("<Return>", self.send_text_input) # Bind Enter key
+
+        self.send_button = tk.Button(
+            input_frame,
+            text="Send",
+            command=self.send_text_input,
+            font=("Arial", 10, "bold"),
+            bg=theme.get("button_bg", "#0d47a1"),
+            fg=theme.get("button_fg", "#ffffff")
+        )
+        self.send_button.pack(side=tk.LEFT)
+
         # Push-to-Talk button
         button_bg = theme.get("button_bg", "#0d47a1")
         button_fg = theme.get("button_fg", "#ffffff")
@@ -133,12 +157,8 @@ class AppGUI:
         )
         self.record_button.pack(pady=10, padx=10, fill=tk.X)
         
-        # Keyboard bindings
-        self.root.bind('<KeyPress-space>', self.on_space_press)
-        self.root.bind('<KeyRelease-space>', self.on_space_release)
-        
         # Initial log message
-        self.log_message("🚀 The Architect is ready. Hold SPACE to start.", "info")
+        self.log_message("🚀 The Architect is ready. Hold SPACE or use the text input to start.", "info")
         self.log_message(f"📂 Working directory: {self.fs_tools.working_dir}", "ai")
     
     # --- Agent Callback Implementations ---
@@ -165,10 +185,10 @@ class AppGUI:
             initialdir=self.fs_tools.working_dir
         )
         if new_dir:
-            self.config.set("working_directory", new_dir)
+            # Update FileSystemTools first to load new ignored files
+            self.fs_tools.update_working_dir(new_dir)
             
-            # Re-initialize components that depend on the working directory
-            self.fs_tools = FileSystemTools(self.config)
+            # Re-initialize agent with the updated FileSystemTools
             self.agent = Agent(
                 config=self.config,
                 fs_tools=self.fs_tools,
@@ -180,8 +200,11 @@ class AppGUI:
             self.agent.debug_enabled = self.debug_var.get()
             self.agent.persistent_session_enabled = self.persistent_session_var.get()
             
-            self.log_message(f"🚀 Project directory changed. Restarting agent...", "info")
+            self.log_message(f"🚀 Project directory changed.", "info")
             self.log_message(f"📂 New working directory: {self.fs_tools.working_dir}", "ai")
+            
+            # Update the file tree after changing directory
+            self.update_file_tree()
 
     def _toggle_debug_logging(self):
         """Toggles debug logging on/off."""
@@ -253,8 +276,46 @@ class AppGUI:
         prompt_text.grid(row=4, column=0, columnspan=2, sticky="nsew")
         prompt_text.insert(tk.END, self.config.get("system_prompt"))
         
+        # Ignored Files/Folders (Global)
+        tk.Label(main_frame, text="Global Ignored Files/Folders:", bg=bg_color, fg=fg_color, anchor="w").grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 5))
+        ignored_frame = tk.Frame(main_frame, bg=bg_color)
+        ignored_frame.grid(row=6, column=0, columnspan=2, sticky="nsew")
+        ignored_frame.grid_columnconfigure(0, weight=1)
+
+        self.ignored_listbox = tk.Listbox(ignored_frame, selectmode=tk.EXTENDED, height=10, bg=entry_bg, fg=fg_color)
+        self.ignored_listbox.grid(row=0, column=0, sticky="nsew")
+        # Populate with global ignored folders
+        for item in self.config.get("ignored_folders", []):
+            self.ignored_listbox.insert(tk.END, item)
+
+        ignored_buttons_frame = tk.Frame(ignored_frame, bg=bg_color)
+        ignored_buttons_frame.grid(row=0, column=1, sticky="ns", padx=(10, 0))
+
+        def add_ignored_item():
+            item = simpledialog.askstring("Add Ignored Item", "Enter file or folder name to ignore:", parent=self.settings_window)
+            if item and item not in self.config.get("ignored_folders", []):
+                self.config.get("ignored_folders", []).append(item)
+                self.ignored_listbox.insert(tk.END, item)
+                self.config.set("ignored_folders", self.config.get("ignored_folders", []))
+
+        def remove_ignored_item():
+            selected_indices = self.ignored_listbox.curselection()
+            if not selected_indices:
+                return
+            
+            for index in sorted(selected_indices, reverse=True):
+                item = self.ignored_listbox.get(index)
+                self.ignored_listbox.delete(index)
+                if item in self.config.get("ignored_folders", []):
+                    self.config.get("ignored_folders", []).remove(item)
+            self.config.set("ignored_folders", self.config.get("ignored_folders", []))
+
+        tk.Button(ignored_buttons_frame, text="+ Add", command=add_ignored_item, bg="#0d47a1", fg="white").pack(fill=tk.X, pady=2)
+        tk.Button(ignored_buttons_frame, text="- Remove", command=remove_ignored_item, bg="#f44336", fg="white").pack(fill=tk.X, pady=2)
+
         main_frame.grid_columnconfigure(1, weight=1)
         main_frame.grid_rowconfigure(4, weight=1)
+        main_frame.grid_rowconfigure(6, weight=1)
 
         # --- Save/Cancel Buttons ---
         def save_settings():
@@ -262,9 +323,10 @@ class AppGUI:
             self.config.set("gemini_model", agent_model_var.get())
             self.config.set("gemini_stt_model", stt_model_var.get())
             self.config.set("system_prompt", prompt_text.get("1.0", tk.END).strip())
+            # Ignored folders are updated directly when added/removed
             
-            self.log_message("Settings saved. A restart is recommended for all changes to take effect.", "info")
-            # Re-initialize agent with new models/prompts
+            self.log_message("Settings saved. A restart is recommended for some changes to take effect.", "info")
+            # Re-initialize agent with new models/prompts if necessary
             self.agent = Agent(
                 config=self.config,
                 fs_tools=self.fs_tools,
@@ -275,12 +337,121 @@ class AppGUI:
             self.settings_window.destroy()
 
         button_frame = tk.Frame(main_frame, bg=bg_color)
-        button_frame.grid(row=5, column=0, columnspan=2, pady=(10, 0), sticky="e")
+        button_frame.grid(row=7, column=0, columnspan=2, pady=(10, 0), sticky="e")
         
         save_button = tk.Button(button_frame, text="Save & Close", command=save_settings, bg="#4caf50", fg="white")
         save_button.pack(side=tk.RIGHT, padx=5)
         
         cancel_button = tk.Button(button_frame, text="Cancel", command=self.settings_window.destroy, bg="#f44336", fg="white")
+        cancel_button.pack(side=tk.RIGHT)
+
+    # --- Ignore Settings Window ---
+    def _open_ignore_settings_window(self):
+        """Opens a window to manage ignored files/folders for the current project."""
+        if self.ignore_settings_window and self.ignore_settings_window.winfo_exists():
+            self.ignore_settings_window.lift()
+            return
+
+        self.ignore_settings_window = tk.Toplevel(self.root)
+        self.ignore_settings_window.title(f"Ignore Settings for: {self.fs_tools.working_dir.name}")
+        self.ignore_settings_window.geometry("500x600") # Increased height slightly
+
+        theme = self.config.get("gui_theme", {})
+        bg_color = theme.get("bg_color", "#1e1e1e")
+        fg_color = theme.get("fg_color", "#ffffff")
+        entry_bg = theme.get("log_bg", "#2d2d2d")
+        
+        self.ignore_settings_window.configure(bg=bg_color)
+
+        main_frame = tk.Frame(self.ignore_settings_window, bg=bg_color, padx=15, pady=15)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(main_frame, text="Ignored Files/Folders:", bg=bg_color, fg=fg_color, anchor="w", font=("Arial", 11, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        
+        listbox_frame = tk.Frame(main_frame, bg=bg_color)
+        listbox_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, 10))
+        listbox_frame.grid_columnconfigure(0, weight=1)
+        listbox_frame.grid_rowconfigure(0, weight=1)
+
+        # Listbox for ignored items (removed insertbackground)
+        self.ignore_listbox = tk.Listbox(listbox_frame, selectmode=tk.EXTENDED, height=15, bg=entry_bg, fg=fg_color)
+        self.ignore_listbox.grid(row=0, column=0, sticky="nsew")
+        
+        # Populate with current project's ignored items
+        current_project_ignores = self.config.get_project_ignored_files(self.fs_tools.working_dir)
+        for item in current_project_ignores:
+            self.ignore_listbox.insert(tk.END, item)
+
+        buttons_frame = tk.Frame(listbox_frame, bg=bg_color)
+        buttons_frame.grid(row=0, column=1, sticky="ns", padx=(10, 0))
+
+        def select_files_to_ignore():
+            selected_items = filedialog.askopenfilenames(
+                title="Select files to ignore",
+                initialdir=self.fs_tools.working_dir
+            )
+            if selected_items:
+                for item_path in selected_items:
+                    item_name = Path(item_path).name
+                    if item_name not in list(self.ignore_listbox.get(0, tk.END)):
+                        self.ignore_listbox.insert(tk.END, item_name)
+
+        def select_folder_to_ignore():
+            selected_folder = filedialog.askdirectory(
+                title="Select a folder to ignore",
+                initialdir=self.fs_tools.working_dir,
+                parent=self.ignore_settings_window
+            )
+            if selected_folder:
+                folder_name = Path(selected_folder).name
+                if folder_name not in list(self.ignore_listbox.get(0, tk.END)):
+                    self.ignore_listbox.insert(tk.END, folder_name)
+
+        def add_ignore_item_manually():
+            item = simpledialog.askstring("Add Ignored Item", "Enter file or folder name to ignore:", parent=self.ignore_settings_window)
+            if item:
+                if item not in list(self.ignore_listbox.get(0, tk.END)):
+                    self.ignore_listbox.insert(tk.END, item)
+
+        def remove_ignore_item():
+            selected_indices = self.ignore_listbox.curselection()
+            if not selected_indices:
+                return
+            
+            for index in sorted(selected_indices, reverse=True):
+                self.ignore_listbox.delete(index)
+
+        tk.Button(buttons_frame, text="+ Add Files", command=select_files_to_ignore, bg="#0d47a1", fg="white").pack(fill=tk.X, pady=2)
+        tk.Button(buttons_frame, text="+ Add Folder", command=select_folder_to_ignore, bg="#0d47a1", fg="white").pack(fill=tk.X, pady=2)
+        tk.Button(buttons_frame, text="+ Add Manually", command=add_ignore_item_manually, bg="#0d47a1", fg="white").pack(fill=tk.X, pady=2)
+        tk.Button(buttons_frame, text="- Remove", command=remove_ignore_item, bg="#f44336", fg="white").pack(fill=tk.X, pady=2)
+
+        main_frame.grid_rowconfigure(1, weight=1)
+
+        # --- Save/Cancel Buttons ---
+        def save_ignore_settings():
+            updated_ignores = list(self.ignore_listbox.get(0, tk.END))
+            self.config.set_project_ignored_files(self.fs_tools.working_dir, updated_ignores)
+            
+            # Update the FileSystemTools instance with the new ignored list
+            self.fs_tools.update_working_dir(self.fs_tools.working_dir)
+
+            self.log_message(f"Ignored files/folders updated for {self.fs_tools.working_dir.name}", "info")
+            
+            # --- NEW: Update Agent's file tree context if in a persistent session ---
+            if self.agent and self.agent.persistent_session_enabled:
+                self.agent.update_file_tree_context(self.agent.persistent_conversation_id)
+            # --- END NEW ---
+
+            self.ignore_settings_window.destroy()
+
+        button_frame = tk.Frame(main_frame, bg=bg_color)
+        button_frame.grid(row=2, column=0, columnspan=2, pady=(10, 0), sticky="e")
+        
+        save_button = tk.Button(button_frame, text="Save & Close", command=save_ignore_settings, bg="#4caf50", fg="white")
+        save_button.pack(side=tk.RIGHT, padx=5)
+        
+        cancel_button = tk.Button(button_frame, text="Cancel", command=self.ignore_settings_window.destroy, bg="#f44336", fg="white")
         cancel_button.pack(side=tk.RIGHT)
 
     # --- Core GUI Logic ---
@@ -327,6 +498,29 @@ class AppGUI:
             self.status_label.config(fg=color)
     
     # --- User Interaction Handlers ---
+
+    def send_text_input(self, event=None):
+        """Sends the text from the input field to the agent."""
+        user_input = self.text_input.get().strip()
+        if user_input:
+            self.log_message(f"📝 You said: {user_input}", "user")
+            self.text_input.delete(0, tk.END) # Clear input field
+            if self.agent:
+                # --- CONCEPTUAL INTEGRATION POINT ---
+                # The agent should use the file tree from fs_tools, which is already filtered.
+                # If the agent needs to actively fetch the file tree upon receiving a prompt,
+                # it should call self.fs_tools.get_file_tree() here or within its processing logic.
+                # Example (if agent directly fetches file tree): 
+                # file_tree_for_llm = self.fs_tools.get_file_tree()
+                # self.agent.process_prompt(user_input, file_tree=file_tree_for_llm)
+                # 
+                # For now, assuming the agent internally calls fs_tools.get_file_tree() when needed:
+                self.agent.process_prompt(user_input)
+                # --- END CONCEPTUAL INTEGRATION ---
+            else:
+                self.log_message("❌ Agent not initialized!", "error")
+        else:
+            self.log_message("Input is empty.", "info")
 
     def on_space_press(self, event):
         """Handle spacebar press"""
@@ -434,8 +628,11 @@ class AppGUI:
         right_frame = tk.Frame(paned_window, bg=bg_color)
         self.preview_label = tk.Label(right_frame, text="Select an action to preview", bg=bg_color, fg="#ffeb3b", font=("Arial", 12, "bold"))
         self.preview_label.pack(pady=5)
-        self.code_preview = scrolledtext.ScrolledText(right_frame, bg="#2d2d2d", fg="white", font=("Courier", 10), state=tk.DISABLED)
-        self.code_preview.pack(fill=tk.BOTH, expand=True)
+        # Placeholder for the code editor
+        self.code_editor_placeholder = tk.Frame(right_frame, bg="#2d2d2d") # Will be replaced by actual editor
+        self.code_editor_placeholder.pack(fill=tk.BOTH, expand=True)
+        # self.code_preview = scrolledtext.ScrolledText(right_frame, bg="#2d2d2d", fg="white", font=("Courier", 10), state=tk.DISABLED)
+        # self.code_preview.pack(fill=tk.BOTH, expand=True)
         paned_window.add(right_frame)
 
         self.review_listbox.bind('<<ListboxSelect>>', self._on_review_select)
@@ -463,10 +660,11 @@ class AppGUI:
         """Handles selection change in the review listbox."""
         selection_indices = self.review_listbox.curselection()
         if not selection_indices:
-            self.code_preview.config(state=tk.NORMAL)
-            self.code_preview.delete("1.0", tk.END)
-            self.code_preview.insert(tk.END, 'No content to display.')
-            self.code_preview.config(state=tk.DISABLED)
+            # Clear the code editor placeholder or show a message
+            for widget in self.code_editor_placeholder.winfo_children():
+                widget.destroy()
+            tk.Label(self.code_editor_placeholder, text='No content to display.', bg="#2d2d2d", fg="white").pack(fill=tk.BOTH, expand=True)
+            self.preview_label.config(text="Select an action to preview")
             return
         
         index = selection_indices[0]
@@ -477,10 +675,19 @@ class AppGUI:
         diff_content = details.get('diff', details.get('content', 'No content to display.'))
 
         self.preview_label.config(text=f"Diff for: {path}")
-        self.code_preview.config(state=tk.NORMAL)
-        self.code_preview.delete("1.0", tk.END)
+        
+        # Clear previous editor content and create a new one or update existing
+        for widget in self.code_editor_placeholder.winfo_children():
+            widget.destroy()
+        
+        # --- Placeholder for Cupcake Editor Integration ---
+        # In a real implementation, you would instantiate your code editor here.
+        # For now, we'll use a simple ScrolledText as a placeholder.
+        self.code_preview = scrolledtext.ScrolledText(self.code_editor_placeholder, wrap=tk.WORD, bg="#2d2d2d", fg="white", font=("Courier", 10), insertbackground="white")
+        self.code_preview.pack(fill=tk.BOTH, expand=True)
         self.code_preview.insert(tk.END, diff_content)
-        self.code_preview.config(state=tk.DISABLED)
+        self.code_preview.config(state=tk.DISABLED) # Start as disabled, enable for editing if needed
+        # --- End Placeholder ---
 
     def _handle_accept(self):
         """Handles the 'Accept' button click for the selected action."""
@@ -576,6 +783,21 @@ class AppGUI:
 
         except Exception as e:
             self.log_queue.put(("log", (f"❌ Feedback audio error: {str(e)}", "error")))
+
+    def update_file_tree(self):
+        """Fetches and updates the file tree, respecting ignored files."""
+        # This method is called when the working directory changes or potentially on startup.
+        # It ensures that self.current_file_tree is updated with the latest filtered view.
+        try:
+            self.current_file_tree = self.fs_tools.get_file_tree()
+            self.log_message("File tree updated.", "info")
+            # If the Agent needs to be explicitly updated with the file tree, 
+            # this is where you would call a method on the agent instance.
+            # For example: self.agent.set_file_tree(self.current_file_tree)
+            # (Assuming such a method exists in the Agent class)
+        except Exception as e:
+            self.log_message(f"Error updating file tree: {e}", "error")
+            self.current_file_tree = ""
 
     def run(self):
         """Start the application"""

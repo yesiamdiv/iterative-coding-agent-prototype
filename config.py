@@ -36,8 +36,11 @@ class Config:
             "dist",
             "build",
             ".vscode",
-            ".idea"
+            ".idea",
+            "venv",
+            "example"
         ],
+        "project_ignored_files": {},
         "max_file_size_kb": 500,
         "backup_extension": ".bak",
         "working_directory": ".",
@@ -61,6 +64,13 @@ class Config:
     
     def __init__(self, config_file: str = "config.json"):
         self.config_file = config_file
+        # Ensure default ignored_folders is a mutable list
+        if "ignored_folders" in self.DEFAULT_CONFIG and isinstance(self.DEFAULT_CONFIG["ignored_folders"], list):
+            self.DEFAULT_CONFIG["ignored_folders"] = list(self.DEFAULT_CONFIG["ignored_folders"])
+        # Ensure default project_ignored_files is a mutable dict
+        if "project_ignored_files" in self.DEFAULT_CONFIG and isinstance(self.DEFAULT_CONFIG["project_ignored_files"], dict):
+            self.DEFAULT_CONFIG["project_ignored_files"] = dict(self.DEFAULT_CONFIG["project_ignored_files"])
+
         self.config = self._load_config()
     
     def _load_config(self) -> Dict[str, Any]:
@@ -75,7 +85,12 @@ class Config:
                 loaded_config = json.load(f)
                 # Merge with defaults to handle missing keys
                 merged_config = self.DEFAULT_CONFIG.copy()
-                merged_config.update(loaded_config)
+                # Deep update for nested dictionaries like gui_theme
+                for key, value in loaded_config.items():
+                    if isinstance(value, dict) and key in merged_config and isinstance(merged_config[key], dict):
+                        merged_config[key].update(value)
+                    else:
+                        merged_config[key] = value
                 return merged_config
         except Exception as e:
             print(f"Error loading config: {e}. Using defaults.")
@@ -97,4 +112,21 @@ class Config:
         """Set configuration value and save"""
         self.config[key] = value
         self._save_config(self.config)
+
+    def get_project_ignored_files(self, project_path: Union[str, Path]) -> List[str]:
+        """Get the list of ignored files/folders for a specific project."""
+        project_path_str = str(Path(project_path).resolve())
+        project_ignores = self.get("project_ignored_files", {}).get(project_path_str, [])
+        global_ignores = self.get("ignored_folders", [])
+        
+        # Combine global and project-specific ignores, avoiding duplicates
+        combined_ignores = list(set(global_ignores + project_ignores))
+        return combined_ignores
+
+    def set_project_ignored_files(self, project_path: Union[str, Path], ignored_list: List[str]):
+        """Set the list of ignored files/folders for a specific project."""
+        project_path_str = str(Path(project_path).resolve())
+        current_project_ignores = self.get("project_ignored_files", {})
+        current_project_ignores[project_path_str] = ignored_list
+        self.set("project_ignored_files", current_project_ignores)
 
